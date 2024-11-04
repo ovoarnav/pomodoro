@@ -11,13 +11,23 @@ import matplotlib.pyplot as plt
 import pytesseract
 from transformers import pipeline
 import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+import spacy
 import pickle  # For saving and loading tasks
+import pyautogui  # For screen capturing
+
+# Load spaCy NLP model and initialize Hugging Face generator
+nlp = spacy.load("en_core_web_sm")
+text_generator = pipeline("text-generation", model="gpt2")
 
 # Ensure pytesseract is installed and configured
 pytesseract.pytesseract.tesseract_cmd = r'/opt/homebrew/bin/tesseract'
 
-# Load spaCy NLP model and initialize Hugging Face generator
-text_generator = pipeline("text-generation", model="gpt2")
+# Directory to save screenshots
+if not os.path.exists('screenshots'):
+    os.makedirs('screenshots')
 
 # Global list to store tasks
 tasks = []
@@ -36,9 +46,54 @@ def save_tasks():
     with open("tasks.pkl", "wb") as f:
         pickle.dump(tasks, f)
 
-# Directory to save screenshots
-if not os.path.exists('screenshots'):
-    os.makedirs('screenshots')
+# Deep learning model for time recommendations
+def build_recommendation_model():
+    model = Sequential([
+        Dense(64, activation='relu', input_shape=(1,)),
+        Dense(32, activation='relu'),
+        Dense(1, activation='linear')
+    ])
+    model.compile(optimizer=Adam(), loss='mse')
+    return model
+
+# Instantiate the recommendation model
+recommendation_model = build_recommendation_model()
+
+# Predict ideal time for a task type using the deep learning model
+def predict_time(task_type):
+    task_data = {"Learning": [], "Creative": [], "Administrative": []}  # Store time data by task type
+    if task_data[task_type]:
+        X_new = np.array([[len(task_data[task_type])]])
+        predicted_time = recommendation_model.predict(X_new)[0][0]
+        return int(predicted_time)
+    return 1800 if task_type == "Learning" else 1200
+
+# Function to classify task type using NLP
+def classify_task_type(task_name):
+    doc = nlp(task_name)
+    for token in doc:
+        if token.lemma_ in ["study", "learn", "research", "read"]:
+            return "Learning"
+        elif token.lemma_ in ["build", "write", "create", "design"]:
+            return "Creative"
+    return "Administrative"
+
+# Function to add a new task with recommended time and update the dropdown
+def add_task(tasks_menu):
+    task_name = simpledialog.askstring("New Task", "Enter task name:")
+    if task_name:
+        task_type = classify_task_type(task_name)
+        recommended_time = predict_time(task_type)
+        tasks.append((task_name, task_type, recommended_time))
+        save_tasks()  # Save the updated tasks list
+        tasks_menu['values'] = [task[0] for task in tasks]  # Update the dropdown with new tasks
+        messagebox.showinfo("Task Added",
+                            f"Task '{task_name}' ({task_type}) added with recommended time: {display_time(recommended_time)}")
+
+# Function to display time in a readable format
+def display_time(seconds):
+    mins, secs = divmod(seconds, 60)
+    return f"{mins:02d}:{secs:02d}"
 
 # Global variable to control recording state
 recording = True
@@ -120,10 +175,17 @@ def start_pomodoro(root, study_time, short_break_time, long_break_time, cycles, 
     countdown(study_time, timer_label, session_label, "Study Time", root, screen_activity_log, session_data,
               selected_task.get(), "Study", end_cycle)
 
-# Function to display time in a readable format
-def display_time(seconds):
-    mins, secs = divmod(seconds, 60)
-    return f"{mins:02d}:{secs:02d}"
+# Countdown function for study/break sessions using the `after` method
+def countdown(duration, timer_label, session_label, session_type, root, screen_activity_log, session_data,
+              task_description, task_type, end_callback):
+    session_label.config(text=session_type)
+    if duration > 0:
+        timer_label.config(text=display_time(duration))
+        root.after(1000, countdown, duration - 1, timer_label, session_label, session_type, root, screen_activity_log,
+                   session_data, task_description, task_type, end_callback)
+    else:
+        timer_label.config(text="00:00")
+        end_callback()
 
 # Main window for task and time management
 def main_window():
@@ -162,8 +224,7 @@ def main_window():
     tasks_menu.pack(pady=5)
 
     # Button to add tasks
-    add_task_button = tk.Button(root, text="Add Task", command=lambda: add_task(tasks_menu), font=("Arial", 14),
-                                width=20)
+    add_task_button = tk.Button(root, text="Add Task", command=lambda: add_task(tasks_menu), font=("Arial", 14), width=20)
     add_task_button.pack(pady=5)
 
     # Session and Timer labels for countdown
@@ -186,8 +247,7 @@ def main_window():
         except ValueError:
             messagebox.showerror("Input Error", "Please enter valid numbers for all Pomodoro settings.")
 
-    start_pomodoro_button = tk.Button(root, text="Start Pomodoro", command=start_pomodoro_action, font=("Arial", 14),
-                                      width=20)
+    start_pomodoro_button = tk.Button(root, text="Start Pomodoro", command=start_pomodoro_action, font=("Arial", 14), width=20)
     start_pomodoro_button.pack(pady=10)
 
     # Set window size
