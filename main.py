@@ -1,110 +1,249 @@
-import tkinter as tk
-from tkinter import messagebox
-from UX import main_window  # The main task and Pomodoro setup window
-from Base Function.py import pomodoro, show_final_congratulations  # Core timer functions
-from AIFeatures import initialize_ai, classify_task_type, track_screen_activity  # AI features
+import time
 import datetime
+import psutil  # For tracking active application usage
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+import spacy
+from transformers import pipeline
+import numpy as np
+import threading  # For tracking screen activity separately
+import pickle  # For saving and loading tasks
 
-# Initialize any AI components
-initialize_ai()
+# Load spaCy NLP model and initialize Hugging Face generator
+nlp = spacy.load("en_core_web_sm")
+text_generator = pipeline("text-generation", model="gpt2")
 
-# Function to start the Pomodoro timer with AI-enhanced insights and tracking
-def start_pomodoro_with_ai(study_time, short_break, long_break, cycles, tasks):
-    # Initialize data storage for analytics
-    analytics_data = []
-    time_adjustments = []
+# Global list to store tasks
+tasks = []
 
-    root = tk.Tk()  # Pomodoro timer window
-    root.title("AI-Enhanced Pomodoro Timer")
 
-    session_label = tk.Label(root, text="", font=("Arial", 20))
-    session_label.pack(pady=5)
-    label = tk.Label(root, text="", font=("Arial", 60))
-    label.pack(pady=5)
-    task_label = tk.Label(root, text="Task: None", font=("Arial", 20))
+# Load saved tasks if available
+def load_tasks():
+    global tasks
+    try:
+        with open("tasks.pkl", "rb") as f:
+            tasks = pickle.load(f)
+    except (FileNotFoundError, EOFError):
+        tasks = []  # Start with an empty list if file not found or empty
+
+
+# Save tasks to file
+def save_tasks():
+    with open("tasks.pkl", "wb") as f:
+        pickle.dump(tasks, f)
+
+
+# Deep learning model for time recommendations
+def build_recommendation_model():
+    model = Sequential([
+        Dense(64, activation='relu', input_shape=(1,)),
+        Dense(32, activation='relu'),
+        Dense(1, activation='linear')
+    ])
+    model.compile(optimizer=Adam(), loss='mse')
+    return model
+
+
+# Instantiate the recommendation model
+recommendation_model = build_recommendation_model()
+
+
+# Predict ideal time for a task type using the deep learning model
+def predict_time(task_type):
+    task_data = {"Learning": [], "Creative": [], "Administrative": []}  # Store time data by task type
+    if task_data[task_type]:
+        X_new = np.array([[len(task_data[task_type])]])
+        predicted_time = recommendation_model.predict(X_new)[0][0]
+        return int(predicted_time)
+    return 1800 if task_type == "Learning" else 1200
+
+
+# Function to classify task type using NLP
+def classify_task_type(task_name):
+    doc = nlp(task_name)
+    for token in doc:
+        if token.lemma_ in ["study", "learn", "research", "read"]:
+            return "Learning"
+        elif token.lemma_ in ["build", "write", "create", "design"]:
+            return "Creative"
+    return "Administrative"
+
+
+# Function to add a new task with recommended time and update the dropdown
+def add_task(tasks_menu):
+    task_name = simpledialog.askstring("New Task", "Enter task name:")
+    if task_name:
+        task_type = classify_task_type(task_name)
+        recommended_time = predict_time(task_type)
+        tasks.append((task_name, task_type, recommended_time))
+        save_tasks()  # Save the updated tasks list
+        tasks_menu['values'] = [task[0] for task in tasks]  # Update the dropdown with new tasks
+        messagebox.showinfo("Task Added",
+                            f"Task '{task_name}' ({task_type}) added with recommended time: {display_time(recommended_time)}")
+
+
+# Function to display time in a readable format
+def display_time(seconds):
+    mins, secs = divmod(seconds, 60)
+    return f"{mins:02d}:{secs:02d}"
+
+
+# Track active application using psutil
+def track_screen_activity(duration, screen_activity_log):
+    start_time = datetime.datetime.now()
+    while (datetime.datetime.now() - start_time).seconds < duration:
+        try:
+            active_app = psutil.Process(psutil.Process().ppid()).name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            active_app = "Unknown"
+
+        screen_activity_log.append((datetime.datetime.now(), active_app))
+        time.sleep(5)  # Log every 5 seconds
+
+
+# Countdown function for study/break sessions using the `after` method
+def countdown(duration, timer_label, session_label, session_type, root, screen_activity_log, session_data,
+              task_description, task_type, end_callback):
+    session_label.config(text=session_type)
+    if duration > 0:
+        timer_label.config(text=display_time(duration))
+        root.after(1000, countdown, duration - 1, timer_label, session_label, session_type, root, screen_activity_log,
+                   session_data, task_description, task_type, end_callback)
+    else:
+        timer_label.config(text="00:00")
+        end_callback()
+
+
+# Function to generate a descriptive summary using generative AI
+def generate_ai_summary(session_data):
+    prompt = "Summarize the user's productivity session based on the following data:\n\n"
+    for entry in session_data:
+        prompt += f"Task: {entry['task']}, Time Spent: {int(entry['time_spent'] // 60)} min {int(entry['time_spent'] % 60)} sec, "
+        prompt += "Screen Activity:\n"
+        for timestamp, app in entry["screen_activity"]:
+            prompt += f"  - {timestamp.strftime('%H:%M:%S')}: {app}\n"
+        prompt += "\n"
+
+    prompt += "\nProvide insights on productivity and any potential areas for improvement.\n"
+    ai_summary = text_generator(prompt, max_length=150, num_return_sequences=1)[0]["generated_text"]
+    return ai_summary
+
+
+# Function to show a summary of time and screen activity
+def show_summary(session_data):
+    ai_summary = generate_ai_summary(session_data)
+    summary_window = tk.Toplevel()
+    summary_window.title("Session Summary")
+    label = tk.Label(summary_window, text=f"AI Summary:\n\n{ai_summary}", font=("Arial", 12), justify="left",
+                     wraplength=380)
+    label.pack(padx=10, pady=10)
+
+
+# Main Pomodoro function with cycle logic and task tracking
+def start_pomodoro(root, study_time, short_break_time, long_break_time, cycles, selected_task, timer_label,
+                   session_label):
+    # Update the UI to display timer and task info
+    session_data = []  # Store data for each session
+    screen_activity_log = []
+
+    def end_cycle():
+        summary_data = {
+            "task": selected_task.get(),
+            "time_spent": study_time,
+            "screen_activity": screen_activity_log
+        }
+        session_data.append(summary_data)
+        screen_activity_log.clear()
+
+        if messagebox.askyesno("Session Complete", "Do you want more time?"):
+            countdown(study_time, timer_label, session_label, "Study Time", root, screen_activity_log, session_data,
+                      selected_task.get(), "Study", end_cycle)
+        else:
+            if len(session_data) >= cycles:
+                show_summary(session_data)
+            else:
+                countdown(short_break_time if (len(session_data) % cycles) else long_break_time, timer_label,
+                          session_label, "Break Time", root, screen_activity_log, session_data, selected_task.get(),
+                          "Break", end_cycle)
+
+    # Start the countdown
+    countdown(study_time, timer_label, session_label, "Study Time", root, screen_activity_log, session_data,
+              selected_task.get(), "Study", end_cycle)
+
+
+# Main window for task and time management
+def main_window():
+    root = tk.Tk()
+    root.title("Task and Pomodoro Manager")
+
+    # Load tasks initially
+    load_tasks()
+
+    # Timer settings frame
+    timer_settings_frame = tk.Frame(root)
+    timer_settings_frame.pack(pady=20)
+
+    # Input fields
+    tk.Label(timer_settings_frame, text="Study Time (min):", font=("Arial", 12)).grid(row=0, column=0, padx=5, pady=5)
+    study_time_entry = tk.Entry(timer_settings_frame, font=("Arial", 12), width=5)
+    study_time_entry.grid(row=0, column=1, padx=5)
+
+    tk.Label(timer_settings_frame, text="Short Break (min):", font=("Arial", 12)).grid(row=1, column=0, padx=5, pady=5)
+    short_break_entry = tk.Entry(timer_settings_frame, font=("Arial", 12), width=5)
+    short_break_entry.grid(row=1, column=1, padx=5)
+
+    tk.Label(timer_settings_frame, text="Long Break (min):", font=("Arial", 12)).grid(row=2, column=0, padx=5, pady=5)
+    long_break_entry = tk.Entry(timer_settings_frame, font=("Arial", 12), width=5)
+    long_break_entry.grid(row=2, column=1, padx=5)
+
+    tk.Label(timer_settings_frame, text="Cycles:", font=("Arial", 12)).grid(row=3, column=0, padx=5, pady=5)
+    cycles_entry = tk.Entry(timer_settings_frame, font=("Arial", 12), width=5)
+    cycles_entry.grid(row=3, column=1, padx=5)
+
+    # Task selection dropdown
+    task_label = tk.Label(root, text="Select Task:", font=("Arial", 14))
     task_label.pack(pady=5)
+    selected_task = tk.StringVar()
+    tasks_menu = ttk.Combobox(root, textvariable=selected_task, values=[task[0] for task in tasks], font=("Arial", 14))
+    tasks_menu.pack(pady=5)
 
-    current_task_index = 0
-    while current_task_index < len(tasks):
-        task_name = tasks[current_task_index]
-        task_type = classify_task_type(task_name)  # Classify task type
-        ai_recommendation = messagebox.askyesno(
-            "AI Timer Suggestion",
-            f"The task '{task_name}' is classified as '{task_type}'. Use AI to set timer?"
-        )
-        if ai_recommendation:
-            # Adjust study time based on task type
-            study_time = 1800 if task_type == "Learning" else 1200  # Example AI-based suggestion
+    # Button to add tasks
+    add_task_button = tk.Button(root, text="Add Task", command=lambda: add_task(tasks_menu), font=("Arial", 14),
+                                width=20)
+    add_task_button.pack(pady=5)
 
-        task_label.config(text=f"Task: {task_name}")
+    # Session and Timer labels for countdown
+    session_label = tk.Label(root, text="Session Type", font=("Arial", 16))
+    session_label.pack(pady=10)
+    timer_label = tk.Label(root, text="00:00", font=("Arial", 48))
+    timer_label.pack(pady=20)
 
-        # Run each Pomodoro cycle
-        for i in range(1, cycles + 1):
-            # Countdown for study time
-            time_spent = pomodoro(study_time, short_break, long_break, cycles, tasks, label, task_label, session_label, root, None)
-            # Screen tracking during the Pomodoro session
-            screen_data = track_screen_activity(time_spent)
+    # Start Pomodoro button
+    def start_pomodoro_action():
+        try:
+            study_time = int(study_time_entry.get()) * 60
+            short_break = int(short_break_entry.get()) * 60
+            long_break = int(long_break_entry.get()) * 60
+            cycles = int(cycles_entry.get())
+            if not selected_task.get():
+                messagebox.showwarning("No Task Selected", "Please select a task to start.")
+                return
+            start_pomodoro(root, study_time, short_break, long_break, cycles, selected_task, timer_label, session_label)
+        except ValueError:
+            messagebox.showerror("Input Error", "Please enter valid numbers for all Pomodoro settings.")
 
-            # Survey after each cycle
-            task_completed = fullscreen_alert(root, task_name)
-            adjusted_time = adjust_time_based_on_performance(time_spent, study_time)
+    start_pomodoro_button = tk.Button(root, text="Start Pomodoro", command=start_pomodoro_action, font=("Arial", 14),
+                                      width=20)
+    start_pomodoro_button.pack(pady=10)
 
-            if task_completed == "Extend":
-                study_time += 5  # Extend for testing purposes
-            elif task_completed:
-                # Record session data
-                analytics_data.append({
-                    'task': task_name,
-                    'time_spent': time_spent,
-                    'completed': True,
-                    'screen_activity': screen_data
-                })
-                time_adjustments.append({
-                    'task': task_name,
-                    'previous_time': study_time,
-                    'new_time': adjusted_time
-                })
+    # Set window size
+    root.geometry("400x500")
+    root.mainloop()
 
-                # Increment task index to move to the next task
-                current_task_index += 1
-                if current_task_index >= len(tasks):
-                    show_final_congratulations(root, analytics_data, time_adjustments)
-                    root.destroy()
-                    return  # End Pomodoro session if all tasks are complete
-            else:
-                # Save data if task was incomplete
-                analytics_data.append({
-                    'task': task_name,
-                    'time_spent': time_spent,
-                    'completed': False,
-                    'screen_activity': screen_data
-                })
-                break
 
-            # Handle short or long breaks
-            if i == cycles:
-                countdown(long_break, label, session_label, "Long Break", root)
-            else:
-                countdown(short_break, label, session_label, "Short Break", root)
-
-    label.config(text="Pomodoro session complete!")
-    session_label.config(text="Well done!")
-    root.update()
-
-# Main control to open the primary interface and manage the AI-enhanced Pomodoro timer
-def main():
-    # Open the task management window
-    main_window()
-
-    # Sample tasks and Pomodoro settings for testing
-    tasks = ["Study for math", "Write report", "Research project"]
-    study_time = 25  # minutes
-    short_break = 5  # minutes
-    long_break = 15  # minutes
-    cycles = 4  # Number of cycles before a long break
-
-    # Start the Pomodoro with AI features
-    start_pomodoro_with_ai(study_time, short_break, long_break, cycles, tasks)
-
+# Run the main window
 if __name__ == "__main__":
-    main()
+    main_window()
