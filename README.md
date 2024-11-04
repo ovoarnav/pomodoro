@@ -1,1 +1,1 @@
-Basic code for an ai pomodor clock that utilises nlp to learn from your tasks and provide you with specific analytics on time to complete goals.
+Basic code for an ai pomodoro clock that utilises nlp to learn from your tasks,screen tracking to learn what you spend ur time on, and generative ai provide you with specific analytics on time to complete goals
